@@ -23,7 +23,7 @@ Total RAM footprint: ~3 GB. Fits comfortably on a small Coolify VPS.
    # generate secrets locally
    openssl rand -base64 32   # use for MEM0_API_KEY
    openssl rand -base64 32   # use for POSTGRES_PASSWORD
-   openssl rand -base64 32   # use for NEO4J_PASSWORD
+   openssl rand -base64 32   # use for GRAPH_PASSWORD (Neo4j)
    ```
 4. In Coolify's **Domains** tab, attach a domain to the `mem0` service on port `8000`.
    Coolify's Traefik handles TLS via Let's Encrypt automatically.
