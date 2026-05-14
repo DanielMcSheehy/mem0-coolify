@@ -1,0 +1,89 @@
+services:
+  mem0:
+    build: .
+    image: mem0-coolify:latest
+    restart: unless-stopped
+    environment:
+      # --- LLM / Embedder ---
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      # --- Postgres (pgvector) ---
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-mem0}
+      POSTGRES_USER: ${POSTGRES_USER:-mem0}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_COLLECTION_NAME: ${POSTGRES_COLLECTION_NAME:-mem0_memories}
+
+      # --- Neo4j (graph memory) ---
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+
+      # --- Models (override if you want gpt-4.1-mini / large embeddings) ---
+      MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-gpt-4.1-mini}
+      MEM0_EMBEDDER_MODEL: ${MEM0_EMBEDDER_MODEL:-text-embedding-3-small}
+      MEM0_EMBEDDING_DIMS: ${MEM0_EMBEDDING_DIMS:-1536}
+
+      # --- Auth (set this; the server has no auth of its own) ---
+      MEM0_API_KEY: ${MEM0_API_KEY}
+    volumes:
+      - ./history:/app/history
+    expose:
+      - "8000"
+    # Coolify maps a public domain to this container.
+    # No host-port binding needed — Coolify's proxy (Traefik) handles ingress + TLS.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  postgres:
+    image: ankane/pgvector:latest
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mem0}
+      POSTGRES_USER: ${POSTGRES_USER:-mem0}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mem0} -d ${POSTGRES_DB:-mem0}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  neo4j:
+    image: neo4j:5-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
