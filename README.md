@@ -7,7 +7,7 @@ Hermes, spacebot.sh, Claude Code, OpenClaw, and local dev.
 
 | Service  | Image                       | Purpose                                  |
 | -------- | --------------------------- | ---------------------------------------- |
-| mem0     | `mem0/mem0-api-server` + patches | REST API on port 8000               |
+| mem0     | Built from `mem0ai/mem0` source | REST API on port 8000 (multi-arch)   |
 | postgres | `ankane/pgvector`           | Vector + metadata store                  |
 | neo4j    | `neo4j:5-community`         | Graph relationships between memories     |
 
@@ -27,7 +27,13 @@ Total RAM footprint: ~3 GB. Fits comfortably on a small Coolify VPS.
    ```
 4. In Coolify's **Domains** tab, attach a domain to the `mem0` service on port `8000`.
    Coolify's Traefik handles TLS via Let's Encrypt automatically.
-5. **Deploy**. First boot takes 2–5 min (image pulls + dependency install + Neo4j warmup).
+5. **Deploy**. First boot takes 3–6 min — the Mem0 image builds from source
+   (pip installs + Neo4j 90s healthcheck warmup). Subsequent deploys are cached and much faster.
+
+> **Why build from source?** The official `mem0/mem0-api-server:latest` image on Docker Hub
+> is published arm64-only, so it fails on amd64 Coolify hosts with
+> `no match for platform in manifest`. Building from source produces a working image
+> on whichever architecture your host runs.
 
 ## Smoke test
 
