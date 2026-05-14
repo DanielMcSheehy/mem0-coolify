@@ -1,45 +1,49 @@
 # Mem0 on Coolify
 
-Self-hosted Mem0 (AI memory backend) for use as a shared knowledge store across
+Self-hosted Mem0 (AI memory backend) as a shared knowledge store across
 Hermes, spacebot.sh, Claude Code, OpenClaw, and local dev.
 
 ## Stack
 
-| Service  | Image                       | Purpose                                  |
-| -------- | --------------------------- | ---------------------------------------- |
-| mem0     | Built from `mem0ai/mem0` source | REST API on port 8000 (multi-arch)   |
-| postgres | `ankane/pgvector`           | Vector + metadata store                  |
-| neo4j    | `neo4j:5-community`         | Graph relationships between memories     |
+| Service  | Image                              | Purpose                                |
+| -------- | ---------------------------------- | -------------------------------------- |
+| mem0     | Built from `mem0ai/mem0` source    | REST API on port 8000 (multi-arch)     |
+| postgres | `ankane/pgvector`                  | Vector + metadata store                |
 
-Total RAM footprint: ~3 GB. Fits comfortably on a small Coolify VPS.
+Total RAM footprint: ~1 GB. Fits comfortably on a small Coolify VPS.
+
+> **Why no Neo4j?** Earlier guides (including Mem0's own blog) describe a
+> three-container stack with Neo4j for graph memory. The current upstream
+> `mem0ai/mem0/server` source only configures `pgvector` — there's no
+> `graph_store` in `DEFAULT_CONFIG`. Running Neo4j adds 2 GB RAM and a
+> known startup-validation footgun for zero benefit on this server.
 
 ## Deploy on Coolify
 
-1. **Create a new resource** → **Docker Compose**.
-2. Point it at this repo (or paste the `docker-compose.yaml` + `Dockerfile` directly).
-3. In Coolify's **Environment Variables** tab, paste the contents of `.env.example`
-   and replace every `REPLACE_ME` with real values:
+1. **Create a new resource** → **Public Repository** → paste this repo's URL.
+2. Build pack: **Docker Compose**.
+3. In Coolify's **Environment Variables** tab, set each variable from `.env.example`:
    ```bash
    # generate secrets locally
-   openssl rand -base64 32   # use for MEM0_API_KEY
+   openssl rand -base64 32   # use for ADMIN_API_KEY
+   openssl rand -base64 48   # use for JWT_SECRET
    openssl rand -base64 32   # use for POSTGRES_PASSWORD
-   openssl rand -base64 32   # use for GRAPH_PASSWORD (Neo4j)
    ```
 4. In Coolify's **Domains** tab, attach a domain to the `mem0` service on port `8000`.
    Coolify's Traefik handles TLS via Let's Encrypt automatically.
-5. **Deploy**. First boot takes 3–6 min — the Mem0 image builds from source
-   (pip installs + Neo4j 90s healthcheck warmup). Subsequent deploys are cached and much faster.
+5. **Deploy**. First boot takes 3–5 min (Mem0 image builds from source). Subsequent
+   deploys hit the build cache.
 
-> **Why build from source?** The official `mem0/mem0-api-server:latest` image on Docker Hub
-> is published arm64-only, so it fails on amd64 Coolify hosts with
-> `no match for platform in manifest`. Building from source produces a working image
-> on whichever architecture your host runs.
+> **Why build from source?** The official `mem0/mem0-api-server:latest` image
+> on Docker Hub is published arm64-only, which fails on amd64 Coolify hosts with
+> `no match for platform in manifest`. Building from source produces a working
+> image on whichever architecture your host runs.
 
 ## Smoke test
 
 ```bash
 export MEM0_URL="https://mem0.your-domain.com"
-export MEM0_KEY="<your MEM0_API_KEY>"
+export MEM0_KEY="<your ADMIN_API_KEY>"
 
 # Add a memory
 curl -X POST "$MEM0_URL/add" \
@@ -62,7 +66,7 @@ curl "$MEM0_URL/memories?user_id=daniel" \
   -H "Authorization: Bearer $MEM0_KEY"
 ```
 
-## Scoping convention (the whole point of this setup)
+## Scoping convention
 
 One Mem0 instance, every agent writes under its own `agent_id` but shares `user_id="daniel"`:
 
@@ -87,7 +91,7 @@ Add to `~/.claude.json`:
       "command": "npx",
       "args": ["-y", "@mem0/mcp-server"],
       "env": {
-        "MEM0_API_KEY": "<your MEM0_API_KEY>",
+        "MEM0_API_KEY": "<your ADMIN_API_KEY>",
         "MEM0_BASE_URL": "https://mem0.your-domain.com",
         "MEM0_USER_ID": "daniel",
         "MEM0_AGENT_ID": "claude-code"
@@ -101,32 +105,25 @@ Claude Code now has `add_memory` / `search_memory` tools pointed at your Coolify
 
 ## Backups
 
-Volumes are named (`postgres_data`, `neo4j_data`) — Coolify's backup feature picks them up.
-For ad-hoc dumps:
+The `postgres_data` volume holds everything. Coolify's backup feature picks it up,
+or run an ad-hoc dump:
 
 ```bash
-# Postgres
-docker compose exec postgres pg_dump -U mem0 mem0 > mem0-pg-$(date +%F).sql
-
-# Neo4j (community edition requires stopping the container)
-docker compose stop neo4j
-docker run --rm -v mem0-coolify_neo4j_data:/data -v $(pwd):/backup \
-  alpine tar czf /backup/mem0-neo4j-$(date +%F).tar.gz /data
-docker compose start neo4j
+docker compose exec postgres pg_dump -U mem0 mem0 > mem0-$(date +%F).sql
 ```
 
 ## Security notes
 
-- **Auth is enforced by `MEM0_API_KEY`** — set it, and only callers with the Bearer token can write/read.
-- **Postgres and Neo4j are NOT exposed** publicly. They're reachable only on Coolify's internal Docker network.
-- **CORS is `*`** by default in the upstream image. Restrict at the Coolify/Traefik layer if you're embedding this in a browser app.
+- **Auth is enforced by `ADMIN_API_KEY`** — only callers with the Bearer token can read/write.
+- **Postgres is NOT exposed publicly.** It's reachable only on Coolify's internal Docker network.
+- **CORS is `*`** by default in the upstream image. Restrict at the Coolify/Traefik layer if you embed this in a browser app.
 
 ## API quick reference
 
-| Method | Path                  | Notes                                    |
-| ------ | --------------------- | ---------------------------------------- |
-| POST   | `/add`                | Add memory. Body: `{messages, user_id, agent_id?, metadata?}` |
-| POST   | `/search`             | Body: `{query, user_id, agent_id?, limit?}` |
-| GET    | `/memories?user_id=…` | List all memories for a user             |
-| DELETE | `/memories/{id}`      | Delete by memory ID                      |
-| GET    | `/docs`               | Swagger UI                               |
+| Method | Path                  | Notes                                                          |
+| ------ | --------------------- | -------------------------------------------------------------- |
+| POST   | `/add`                | Add memory. Body: `{messages, user_id, agent_id?, metadata?}`  |
+| POST   | `/search`             | Body: `{query, user_id, agent_id?, limit?}`                    |
+| GET    | `/memories?user_id=…` | List memories for a user                                       |
+| DELETE | `/memories/{id}`      | Delete by memory ID                                            |
+| GET    | `/docs`               | Swagger UI                                                     |

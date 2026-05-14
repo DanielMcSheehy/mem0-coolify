@@ -4,10 +4,10 @@ services:
     image: mem0-coolify:latest
     restart: unless-stopped
     environment:
-      # --- LLM / Embedder ---
+      # --- LLM / Embedder (OpenAI) ---
       OPENAI_API_KEY: ${OPENAI_API_KEY}
 
-      # --- Postgres (pgvector) ---
+      # --- Postgres (pgvector — the only datastore Mem0's server actually uses) ---
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-mem0}
@@ -15,28 +15,23 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_COLLECTION_NAME: ${POSTGRES_COLLECTION_NAME:-mem0_memories}
 
-      # --- Neo4j (graph memory) ---
-      NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USERNAME: neo4j
-      NEO4J_PASSWORD: ${GRAPH_PASSWORD}
+      # --- Models ---
+      MEM0_DEFAULT_LLM_MODEL: ${MEM0_LLM_MODEL:-gpt-4.1-mini}
+      MEM0_DEFAULT_EMBEDDER_MODEL: ${MEM0_EMBEDDER_MODEL:-text-embedding-3-small}
 
-      # --- Models (override if you want gpt-4.1-mini / large embeddings) ---
-      MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-gpt-4.1-mini}
-      MEM0_EMBEDDER_MODEL: ${MEM0_EMBEDDER_MODEL:-text-embedding-3-small}
-      MEM0_EMBEDDING_DIMS: ${MEM0_EMBEDDING_DIMS:-1536}
-
-      # --- Auth (set this; the server has no auth of its own) ---
-      MEM0_API_KEY: ${MEM0_API_KEY}
+      # --- Auth (server requires ONE of these) ---
+      # ADMIN_API_KEY: legacy single-key auth, sent as `Authorization: Bearer <key>`
+      # JWT_SECRET:    required even when using ADMIN_API_KEY (used to sign tokens)
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      JWT_SECRET: ${JWT_SECRET}
     volumes:
       - ./history:/app/history
     expose:
       - "8000"
     # Coolify maps a public domain to this container.
-    # No host-port binding needed — Coolify's proxy (Traefik) handles ingress + TLS.
+    # Coolify's Traefik handles ingress + TLS — no host port binding needed.
     depends_on:
       postgres:
-        condition: service_healthy
-      neo4j:
         condition: service_healthy
     deploy:
       resources:
@@ -62,37 +57,5 @@ services:
         limits:
           memory: 1G
 
-  neo4j:
-    image: neo4j:5-community
-    restart: unless-stopped
-    # IMPORTANT: do NOT name any env var here starting with NEO4J_ except the
-    # documented config keys (NEO4J_AUTH, NEO4J_PLUGINS, NEO4J_dbms_*, etc.).
-    # Neo4j 5's strict_validation parses every NEO4J_* env var as a config setting.
-    # That's why the user-facing password var is GRAPH_PASSWORD.
-    environment:
-      NEO4J_AUTH: neo4j/${GRAPH_PASSWORD}
-      NEO4J_PLUGINS: '["apoc"]'
-      # APOC core is allowed by default in the official image; no unrestricted
-      # procedures config needed for Mem0's graph memory features.
-    volumes:
-      - neo4j_data:/data
-      - neo4j_logs:/logs
-    healthcheck:
-      # cypher-shell is bundled in the image and is the most reliable readiness signal.
-      # GRAPH_PASSWORD is interpolated by Compose at parse time (single $) — we want
-      # the literal value baked into the test command, not a runtime shell lookup,
-      # because the neo4j container does not export GRAPH_PASSWORD to its shell.
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${GRAPH_PASSWORD} 'RETURN 1' || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 20
-      start_period: 120s
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-
 volumes:
   postgres_data:
-  neo4j_data:
-  neo4j_logs:
