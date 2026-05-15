@@ -1,22 +1,24 @@
-# Mem0 on Coolify
+# Hindsight on Coolify
 
-Self-hosted Mem0 (AI memory backend) as a shared knowledge store across
-Hermes, spacebot.sh, Claude Code, OpenClaw, and local dev.
+Self-hosted [Hindsight](https://hindsight.vectorize.io) (AI agent memory) as a
+shared knowledge store across Hermes, spacebot.sh, Claude Code, OpenClaw, and
+local dev.
+
+> This repo previously hosted a Mem0 setup. Mem0's self-host story had too many
+> sharp edges (two-DB Postgres init, alembic, arm64-only image, env var
+> collisions). Switched to Hindsight — single container, multi-arch, embedded
+> Postgres, MCP built in. See `docker-compose.mem0.yaml.deprecated` for the old
+> stack if you want to compare.
 
 ## Stack
 
-| Service  | Image                              | Purpose                                |
-| -------- | ---------------------------------- | -------------------------------------- |
-| mem0     | Built from `mem0ai/mem0` source    | REST API on port 8000 (multi-arch)     |
-| postgres | `ankane/pgvector`                  | Vector + metadata store                |
+| Service   | Image                                  | Notes                                |
+| --------- | -------------------------------------- | ------------------------------------ |
+| hindsight | `ghcr.io/vectorize-io/hindsight:latest`| API on 8888 (+ MCP) and UI on 9999. Embedded Postgres with pgvector. |
 
-Total RAM footprint: ~1 GB. Fits comfortably on a small Coolify VPS.
-
-> **Why no Neo4j?** Earlier guides (including Mem0's own blog) describe a
-> three-container stack with Neo4j for graph memory. The current upstream
-> `mem0ai/mem0/server` source only configures `pgvector` — there's no
-> `graph_store` in `DEFAULT_CONFIG`. Running Neo4j adds 2 GB RAM and a
-> known startup-validation footgun for zero benefit on this server.
+One container. Multi-arch (amd64 + arm64). Bundled local embedder so OpenAI is
+only used for fact extraction and reflect reasoning. Total RAM footprint:
+~2–3 GB idle.
 
 ## Deploy on Coolify
 
@@ -24,106 +26,139 @@ Total RAM footprint: ~1 GB. Fits comfortably on a small Coolify VPS.
 2. Build pack: **Docker Compose**.
 3. In Coolify's **Environment Variables** tab, set each variable from `.env.example`:
    ```bash
-   # generate secrets locally
-   openssl rand -base64 32   # use for ADMIN_API_KEY
-   openssl rand -base64 48   # use for JWT_SECRET
-   openssl rand -base64 32   # use for POSTGRES_PASSWORD
+   # generate the Hindsight bearer token
+   openssl rand -hex 32
    ```
-4. In Coolify's **Domains** tab, attach a domain to the `mem0` service on port `8000`.
-   Coolify's Traefik handles TLS via Let's Encrypt automatically.
-5. **Deploy**. First boot takes 3–5 min (Mem0 image builds from source). Subsequent
-   deploys hit the build cache.
-
-> **Why build from source?** The official `mem0/mem0-api-server:latest` image
-> on Docker Hub is published arm64-only, which fails on amd64 Coolify hosts with
-> `no match for platform in manifest`. Building from source produces a working
-> image on whichever architecture your host runs.
+4. In Coolify's **Domains** tab:
+   - Attach a primary domain to the `hindsight` service on port **8888** (API + MCP)
+   - Optionally attach a second domain on port **9999** (Control Plane UI)
+5. **Deploy.** First boot pulls a ~4 GB image and runs DB migrations — takes 2–4 min.
 
 ## Smoke test
 
 ```bash
-export MEM0_URL="https://mem0.your-domain.com"
-export MEM0_KEY="<your ADMIN_API_KEY>"
+export HS_URL="https://hindsight.your-domain.com"
+export HS_KEY="<your HINDSIGHT_API_KEY>"
 
-# Add a memory
-curl -X POST "$MEM0_URL/add" \
-  -H "Authorization: Bearer $MEM0_KEY" \
+# Create a bank for Daniel
+curl -X POST "$HS_URL/banks" \
+  -H "Authorization: Bearer $HS_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "messages": [{"role": "user", "content": "Daniel prefers concise, technical answers."}],
-    "user_id": "daniel",
-    "agent_id": "hermes"
-  }'
+  -d '{"id": "daniel-global", "name": "Daniel global memory"}'
 
-# Search
-curl -X POST "$MEM0_URL/search" \
-  -H "Authorization: Bearer $MEM0_KEY" \
+# Retain a memory
+curl -X POST "$HS_URL/banks/daniel-global/retain" \
+  -H "Authorization: Bearer $HS_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query": "communication style", "user_id": "daniel"}'
+  -d '{"content": "Daniel prefers concise, technical answers and self-hosts everything on Coolify."}'
 
-# List
-curl "$MEM0_URL/memories?user_id=daniel" \
-  -H "Authorization: Bearer $MEM0_KEY"
+# Recall
+curl -X POST "$HS_URL/banks/daniel-global/recall" \
+  -H "Authorization: Bearer $HS_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "communication style"}'
 ```
 
-## Scoping convention
+The Control Plane UI at `https://hindsight-ui.your-domain.com` gives you a
+visual browser for banks, memories, and the retain/recall/reflect operations.
 
-One Mem0 instance, every agent writes under its own `agent_id` but shares `user_id="daniel"`:
+## Memory bank topology
 
-| Caller            | `user_id`  | `agent_id`     |
-| ----------------- | ---------- | -------------- |
-| Hermes            | `daniel`   | `hermes`       |
-| spacebot.sh       | `daniel`   | `spacebot`     |
-| Claude Code       | `daniel`   | `claude-code`  |
-| OpenClaw          | `daniel`   | `openclaw`     |
-| local dev / REPL  | `daniel`   | `local-dev`    |
+Unlike Mem0's `user_id` / `agent_id` model, Hindsight uses **banks** — named
+collections of memories. Pick one of two strategies:
 
-Search across all agents: omit `agent_id`. Search a specific agent's memory only: include it.
+### A — One global bank, every agent reads/writes the same store
 
-## Wiring Claude Code (MCP)
+| Caller            | Bank ID         |
+| ----------------- | --------------- |
+| Hermes            | `daniel-global` |
+| spacebot.sh       | `daniel-global` |
+| Claude Code       | `daniel-global` |
+| OpenClaw          | `daniel-global` |
 
-Add to `~/.claude.json`:
+Pros: Fully shared knowledge. Cons: No per-agent scoping.
+
+### B — Per-agent banks + a shared bank for things everyone should know
+
+| Caller            | Bank ID         |
+| ----------------- | --------------- |
+| Hermes            | `hermes`        |
+| spacebot.sh       | `spacebot`      |
+| Claude Code       | `claude-code`   |
+| OpenClaw          | `openclaw`      |
+| Anyone, anything  | `daniel-shared` |
+
+Pros: Isolated agent histories + a shared "global facts" pool. Cons: More banks
+to manage; cross-bank recall requires multiple API calls.
+
+Recommend **(B)** for production-grade isolation, **(A)** for max simplicity.
+
+## Wiring Claude Code (MCP — built into Hindsight)
+
+Hindsight serves an MCP endpoint at `/mcp/{bank_id}/`. Add to `~/.claude.json`:
 
 ```json
 {
   "mcpServers": {
-    "mem0": {
+    "hindsight": {
       "command": "npx",
-      "args": ["-y", "@mem0/mcp-server"],
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://hindsight.your-domain.com/mcp/claude-code/",
+        "--header",
+        "Authorization:${HS_AUTH}"
+      ],
       "env": {
-        "MEM0_API_KEY": "<your ADMIN_API_KEY>",
-        "MEM0_BASE_URL": "https://mem0.your-domain.com",
-        "MEM0_USER_ID": "daniel",
-        "MEM0_AGENT_ID": "claude-code"
+        "HS_AUTH": "Bearer <your HINDSIGHT_API_KEY>"
       }
     }
   }
 }
 ```
 
-Claude Code now has `add_memory` / `search_memory` tools pointed at your Coolify instance.
+Claude Code now has `retain` / `recall` / `reflect` tools scoped to the
+`claude-code` bank. Change the bank ID in the URL path to point at a different
+bank.
+
+## Wiring Hermes and OpenClaw
+
+Both have first-class Hindsight plugins:
+
+- **Hermes:** `hermes memory setup hindsight` (per `get-hermes.ai/memory`)
+- **OpenClaw:** `hindsight-openclaw` plugin (see Hindsight's blog post "One
+  Memory for Every AI Tool I Use")
+
+Point each at `https://hindsight.your-domain.com` with the Bearer token.
 
 ## Backups
 
-The `postgres_data` volume holds everything. Coolify's backup feature picks it up,
-or run an ad-hoc dump:
+The `hindsight_data` named volume holds everything. Coolify backups pick it up,
+or run an ad-hoc dump from the Coolify host:
 
 ```bash
-docker compose exec postgres pg_dump -U mem0 mem0 > mem0-$(date +%F).sql
+# Volume contents (embedded postgres) — tar the whole directory
+docker run --rm \
+  -v $(docker volume ls -q | grep hindsight_data):/data \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/hindsight-$(date +%F).tar.gz /data
 ```
 
 ## Security notes
 
-- **Auth is enforced by `ADMIN_API_KEY`** — only callers with the Bearer token can read/write.
-- **Postgres is NOT exposed publicly.** It's reachable only on Coolify's internal Docker network.
-- **CORS is `*`** by default in the upstream image. Restrict at the Coolify/Traefik layer if you embed this in a browser app.
+- **Auth is enforced by `HINDSIGHT_API_KEY`** — only callers with the Bearer
+  token can read/write. Applies to both REST and MCP endpoints.
+- **No host port exposure.** Coolify's Traefik handles ingress + TLS.
+- **CORS is permissive by default** — tighten at the Coolify/Traefik layer if
+  you embed this in a browser app.
 
-## API quick reference
+## Why Hindsight over Mem0
 
-| Method | Path                  | Notes                                                          |
-| ------ | --------------------- | -------------------------------------------------------------- |
-| POST   | `/add`                | Add memory. Body: `{messages, user_id, agent_id?, metadata?}`  |
-| POST   | `/search`             | Body: `{query, user_id, agent_id?, limit?}`                    |
-| GET    | `/memories?user_id=…` | List memories for a user                                       |
-| DELETE | `/memories/{id}`      | Delete by memory ID                                            |
-| GET    | `/docs`               | Swagger UI                                                     |
+| Concern                       | Mem0                              | Hindsight                            |
+| ----------------------------- | --------------------------------- | ------------------------------------ |
+| Self-host complexity          | High (2 DBs + alembic + init.sh)  | Low (single container)               |
+| Multi-arch image              | arm64-only on Docker Hub          | amd64 + arm64 on GHCR                |
+| MCP server                    | Separate `@mem0/mcp-server` pkg   | Built into the API container         |
+| Embedded DB option            | No (requires external Postgres)   | Yes (`/home/hindsight/.pg0`)         |
+| Auth                          | DIY (env var routing)             | Built-in tenant extension            |
+| Time to working deploy        | Many hours                        | Minutes                              |

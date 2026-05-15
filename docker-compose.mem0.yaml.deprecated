@@ -1,0 +1,75 @@
+services:
+  mem0:
+    build: .
+    image: mem0-coolify:latest
+    restart: unless-stopped
+    environment:
+      # --- LLM / Embedder (OpenAI) ---
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      # --- Postgres: TWO databases in one instance ---
+      # POSTGRES_DB ('postgres' by default) holds the pgvector memory tables.
+      # APP_DB_NAME ('mem0_app') holds the auth/users/api-keys tables, created
+      # by init-db.sh on first Postgres init and migrated by alembic on boot.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_COLLECTION_NAME: ${POSTGRES_COLLECTION_NAME:-mem0_memories}
+      APP_DB_NAME: mem0_app
+
+      # --- Models ---
+      MEM0_DEFAULT_LLM_MODEL: ${MEM0_LLM_MODEL:-gpt-4.1-mini}
+      MEM0_DEFAULT_EMBEDDER_MODEL: ${MEM0_EMBEDDER_MODEL:-text-embedding-3-small}
+
+      # --- Auth ---
+      # ADMIN_API_KEY: sent by clients as `Authorization: Bearer <key>`
+      # JWT_SECRET:    required by server to sign internal JWTs
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+
+      # Disable the dashboard expectation; the server logs warnings about
+      # DASHBOARD_URL but works fine without one.
+      DASHBOARD_URL: http://localhost:3000
+      MEM0_TELEMETRY: "false"
+    volumes:
+      - ./history:/app/history
+    expose:
+      - "8000"
+    # Coolify maps a public domain to this container.
+    # Coolify's Traefik handles ingress + TLS — no host port binding needed.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  postgres:
+    image: ankane/pgvector:latest
+    restart: unless-stopped
+    shm_size: "128mb"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Creates the second database (mem0_app) on first init. ONLY runs when
+      # the data volume is empty — re-deploys against an existing volume
+      # won't re-run this. If you ever wipe postgres_data, this re-runs.
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+volumes:
+  postgres_data:
